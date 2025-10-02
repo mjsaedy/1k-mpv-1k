@@ -1,0 +1,548 @@
+--------------------------------------
+User:
+
+
+Can you evaluate this code:
+
+using System;
+using System.IO;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+class LaunchAndWait {
+
+    private Process myProcess;
+    private TaskCompletionSource<bool> eventHandled;
+
+    public async Task LaunchMPV(string fileName) {
+        eventHandled = new TaskCompletionSource<bool>();
+        using (myProcess = new Process()) {
+            try {
+                // Start a process and raise an event when done.
+                myProcess.StartInfo.Arguments = String.Format("\"{0}\"", fileName);;
+                myProcess.StartInfo.FileName = @"mpv.exe"; //mpv.exe should be on the PATH
+                myProcess.StartInfo.Verb = "Open";
+                //myProcess.StartInfo.CreateNoWindow = true;
+                myProcess.EnableRaisingEvents = true;
+                myProcess.Exited += new EventHandler(myProcess_Exited);
+                myProcess.Start();
+            } catch (Exception ex) {
+                //Console.WriteLine("An error occurred trying to print \""  + fileName + "\":\n" + ex.Message);
+                return;
+            }
+            // Wait for Exited event, but no more than 30 seconds.
+            //await Task.WhenAny(eventHandled.Task, Task.Delay(30000));
+            //mdsy: this seems unnecessary
+            //from MS-Learn: "When this method returns the first completed task, the other tasks will continue running until completion."
+            await Task.WhenAny(eventHandled.Task);
+        }
+    }
+
+    // Handle Exited event
+    private void myProcess_Exited(object sender, System.EventArgs e) {
+        /*
+        Console.WriteLine(
+            String.Format("Exit time    : {0}\n", myProcess.ExitTime) +
+            String.Format("Exit code    : {0}\n", myProcess.ExitCode) +
+            String.Format("Elapsed time : {0}\n", Math.Round((myProcess.ExitTime - myProcess.StartTime).TotalMilliseconds))
+        );
+        */
+        eventHandled.TrySetResult(true);
+    }
+
+    public static async Task Do_1k_mpv_1k(string filename) {
+        
+        //store original mod-time
+        DateTime originalWriteTime;
+        originalWriteTime = File.GetLastWriteTime(filename); //save mod time
+
+        //1k
+        SimpleHexViewer.Toggle1k.Do1k(filename);
+
+        //launch mpv
+        LaunchAndWait myProcess = new LaunchAndWait();
+        await myProcess.LaunchMPV(filename);
+
+        //1k
+        Thread.Sleep(200); //wait, just in case
+        SimpleHexViewer.Toggle1k.Do1k(filename);
+        
+        //restore original mod-time
+        Thread.Sleep(100); //wait, just in case
+         File.SetLastWriteTime(filename, originalWriteTime); //restore original mod time
+    }
+
+    [STAThread]
+    static void Main(string[] args) {
+        if (args.Length == 0) {
+            //Console.WriteLine("Provide a file name.");
+            return;
+        }
+        string filename = args[0];
+        if (filename == string.Empty || !File.Exists(filename) ){
+            MessageBox.Show("File not found!");
+            return;
+        }
+        long length = new System.IO.FileInfo(filename).Length;
+        if ( length < (1024*1024) ){ // 1MB, just an arbitrary value
+            MessageBox.Show("File too small!");
+            return;
+        }
+        Task.Run(async () => {
+            //async execution
+            await Do_1k_mpv_1k(filename);
+        }).GetAwaiter().GetResult();
+    }
+
+}
+--------------------------------------
+ChatGPT:
+
+
+I’ve carefully reviewed your code. Here’s a detailed evaluation, covering correctness, potential pitfalls, and style considerations.
+
+1. General Overview
+
+Your program:
+
+Modifies the first 1k bytes of a file (via SimpleHexViewer.Toggle1k.Do1k),
+
+Launches mpv.exe to play the file asynchronously,
+
+Restores the original 1k bytes after playback,
+
+Restores the original modification timestamp of the file.
+
+It uses asynchronous programming (Task, async/await) and Process.Exited event handling.
+
+2. Correctness
+2.1 Process Handling
+csharp
+Copy code
+myProcess.StartInfo.Arguments = String.Format("\"{0}\"", fileName);
+myProcess.StartInfo.FileName = @"mpv.exe";
+myProcess.StartInfo.Verb = "Open";
+myProcess.EnableRaisingEvents = true;
+myProcess.Exited += new EventHandler(myProcess_Exited);
+
+
+✅ EnableRaisingEvents is correctly set before subscribing to Exited.
+
+⚠ Verb = "Open" is not needed here; it’s only relevant for shell verbs (like open, print) and may conflict with directly launching an .exe. You can remove it.
+
+✅ Wrapping Process in using ensures disposal, but be careful: disposing the Process object before the Exited event fires may cause issues. Currently, await Task.WhenAny(eventHandled.Task) is inside the using block, so it should be okay.
+
+✅ The TaskCompletionSource pattern is valid to await Exited.
+
+2.2 Awaiting Exited
+csharp
+Copy code
+await Task.WhenAny(eventHandled.Task);
+
+
+⚠ Task.WhenAny here is unnecessary because you’re only awaiting a single task. await eventHandled.Task; is simpler and clearer.
+
+⚠ You had commented out a timeout. Currently, your code waits forever if mpv never exits. Consider adding a timeout to avoid potential hangs.
+
+2.3 File Modification Logic
+csharp
+Copy code
+DateTime originalWriteTime = File.GetLastWriteTime(filename);
+SimpleHexViewer.Toggle1k.Do1k(filename);
+...
+Thread.Sleep(200);
+SimpleHexViewer.Toggle1k.Do1k(filename);
+Thread.Sleep(100);
+File.SetLastWriteTime(filename, originalWriteTime);
+
+
+✅ Saving and restoring file write time is correct.
+
+⚠ Thread.Sleep is not ideal in async methods. Consider await Task.Delay(200); to avoid blocking the thread.
+
+⚠ If SimpleHexViewer.Toggle1k.Do1k throws an exception, the second Do1k and timestamp restore may not execute. Wrap in try/finally to ensure restoration.
+
+2.4 Main Method
+csharp
+Copy code
+Task.Run(async () => {
+    await Do_1k_mpv_1k(filename);
+}).GetAwaiter().GetResult();
+
+
+✅ This is a common pattern to call async code from a synchronous Main in .NET Framework.
+
+⚠ Be aware: any exceptions in the async task will be thrown here synchronously.
+
+⚠ Blocking on async code can lead to deadlocks in GUI contexts. You’re using [STAThread] but you’re not using WinForms GUI except for MessageBox. It should be fine here, but keep in mind.
+
+3. Potential Issues / Edge Cases
+
+File size check:
+
+csharp
+Copy code
+if (length < (1024*1024)) { ... }
+
+
+Works, but 1 MB is arbitrary. Consider documenting why.
+
+mpv not found:
+
+If mpv.exe isn’t in PATH, your code silently returns due to catch (Exception ex) { return; }. You may want to inform the user.
+
+Concurrent calls:
+
+Each call creates a new LaunchAndWait instance; that’s fine. No static state is being modified.
+
+File locking:
+
+mpv may lock the file, depending on platform and build. Your second Do1k may fail if the file is still open.
+
+Disposal of Process inside using:
+
+Current pattern is fine because you await the event before exiting the using. ✅
+
+4. Style / Readability Improvements
+
+Remove redundant semicolon here:
+
+csharp
+Copy code
+myProcess.StartInfo.Arguments = String.Format("\"{0}\"", fileName);;
+
+
+Prefer await eventHandled.Task; instead of Task.WhenAny.
+
+Replace Thread.Sleep with await Task.Delay(...).
+
+Consider try/finally around file modification to ensure restoration.
+
+Remove StartInfo.Verb = "Open"; unless explicitly needed.
+
+5. Suggested Improvements
+csharp
+Copy code
+// inside Do_1k_mpv_1k
+DateTime originalWriteTime = File.GetLastWriteTime(filename);
+
+try {
+    SimpleHexViewer.Toggle1k.Do1k(filename);
+
+    LaunchAndWait myProcess = new LaunchAndWait();
+    await myProcess.LaunchMPV(filename);
+
+    await Task.Delay(200);
+    SimpleHexViewer.Toggle1k.Do1k(filename);
+} finally {
+    await Task.Delay(100);
+    File.SetLastWriteTime(filename, originalWriteTime);
+}
+
+
+This ensures the timestamp is always restored even if Do1k or mpv fails.
+
+✅ Summary
+
+Functionally correct for its purpose.
+
+Minor issues:
+
+Verb = "Open" not needed.
+
+Use await Task.Delay instead of Thread.Sleep.
+
+Consider try/finally for file restoration.
+
+Optional: handle mpv missing or hung processes.
+
+Otherwise, async pattern and file handling are solid.
+
+If you want, I can rewrite the entire program with all these improvements applied, making it cleaner, safer, and fully async-friendly.
+
+Do you want me to do that?
+--------------------------------------
+User:
+
+
+yes
+--------------------------------------
+ChatGPT:
+
+
+Here’s a cleaned-up, safer, fully async-friendly version of your program with all the improvements applied:
+
+csharp
+Copy code
+using System;
+using System.IO;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+class LaunchAndWait {
+
+    private Process myProcess;
+    private TaskCompletionSource<bool> eventHandled;
+
+    public async Task LaunchMPV(string fileName) {
+        eventHandled = new TaskCompletionSource<bool>();
+
+        using (myProcess = new Process()) {
+            try {
+                myProcess.StartInfo.FileName = "mpv.exe"; // must be in PATH
+                myProcess.StartInfo.Arguments = $"\"{fileName}\"";
+                myProcess.EnableRaisingEvents = true;
+                myProcess.Exited += (sender, e) => eventHandled.TrySetResult(true);
+
+                myProcess.Start();
+            } catch (Exception ex) {
+                MessageBox.Show($"Failed to launch mpv:\n{ex.Message}");
+                return;
+            }
+
+            // Wait for process to exit
+            await eventHandled.Task;
+        }
+    }
+
+    public static async Task Do1kMpv1kAsync(string filename) {
+        DateTime originalWriteTime = File.GetLastWriteTime(filename);
+
+        try {
+            // First 1k modification
+            SimpleHexViewer.Toggle1k.Do1k(filename);
+
+            // Launch mpv and wait
+            LaunchAndWait launcher = new LaunchAndWait();
+            await launcher.LaunchMPV(filename);
+
+            // Wait a bit, then revert first 1k
+            await Task.Delay(200);
+            SimpleHexViewer.Toggle1k.Do1k(filename);
+        } finally {
+            // Restore original modification time
+            await Task.Delay(100);
+            File.SetLastWriteTime(filename, originalWriteTime);
+        }
+    }
+
+    [STAThread]
+    static void Main(string[] args) {
+        if (args.Length == 0) return;
+
+        string filename = args[0];
+        if (string.IsNullOrWhiteSpace(filename) || !File.Exists(filename)) {
+            MessageBox.Show("File not found!");
+            return;
+        }
+
+        long length = new FileInfo(filename).Length;
+        if (length < 1024 * 1024) { // arbitrary 1MB check
+            MessageBox.Show("File too small!");
+            return;
+        }
+
+        try {
+            Task.Run(async () => await Do1kMpv1kAsync(filename))
+                .GetAwaiter()
+                .GetResult();
+        } catch (Exception ex) {
+            MessageBox.Show($"An error occurred:\n{ex.Message}");
+        }
+    }
+}
+
+✅ Improvements made
+
+Removed unnecessary Verb = "Open".
+
+Replaced Thread.Sleep with await Task.Delay.
+
+Added try/finally to ensure file modification time is restored even if something fails.
+
+Simplified Exited event handler with a lambda.
+
+Added basic error messages for mpv launch failure.
+
+Cleaned up redundant semicolons and formatting.
+
+This version is safer, fully async-friendly, and easier to maintain.
+
+If you want, I can also add a timeout for mpv in case it never exits, which would make it much more robust for large or locked files. Do you want me to add that?
+--------------------------------------
+User:
+
+
+The problem is what would be the interval of the timeout? After all, this is a video player. It is quite possible to play for hours.
+--------------------------------------
+ChatGPT:
+
+
+Ah, exactly — that’s the tricky part. A video player like mpv can run indefinitely, so a fixed timeout is dangerous: it would kill the process while the user is still watching.
+
+Given that, there are a few safer alternatives instead of a strict timeout:
+
+1. Rely on process exit only
+
+Keep it fully asynchronous and just wait for mpv to exit.
+
+This is exactly what your current code does:
+
+csharp
+Copy code
+await eventHandled.Task;
+
+
+✅ Safe: will never terminate the video prematurely.
+
+⚠ Downside: if mpv crashes or hangs for some reason, your code could be stuck indefinitely.
+
+2. Optional “soft” timeout for stuck processes
+
+Instead of a hard cutoff, you can monitor whether the process is responding.
+
+Example: check every few seconds if the process still exists, or has frozen.
+
+If frozen, you can notify the user or give them the option to terminate manually.
+
+3. Let the user close mpv manually
+
+Since mpv has its own controls, the cleanest approach is to just wait until the user closes it.
+
+This way you don’t arbitrarily decide how long a video can be played.
+
+Conclusion
+
+For your use case (video player), no timeout is appropriate. You should keep:
+
+csharp
+Copy code
+await eventHandled.Task;
+
+
+…as it is. The only thing to guard against is process never starting (try/catch) or file restoration on crash, which you already handle with try/finally.
+
+If you want, I can suggest a slightly more robust version that handles the rare case of mpv not starting or crashing, without imposing a timeout on playback. It would make the program extremely safe for long videos. Do you want me to do that?
+--------------------------------------
+User:
+
+
+let's see
+--------------------------------------
+ChatGPT:
+
+
+Here’s a slightly more robust version that handles the rare cases of mpv not starting or crashing, without imposing any timeout on normal playback:
+
+csharp
+Copy code
+using System;
+using System.IO;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+class LaunchAndWait {
+
+    private Process myProcess;
+    private TaskCompletionSource<bool> eventHandled;
+
+    public async Task LaunchMPV(string fileName) {
+        eventHandled = new TaskCompletionSource<bool>();
+
+        try {
+            myProcess = new Process {
+                StartInfo = {
+                    FileName = "mpv.exe", // must be in PATH
+                    Arguments = $"\"{fileName}\""
+                },
+                EnableRaisingEvents = true
+            };
+            myProcess.Exited += (sender, e) => eventHandled.TrySetResult(true);
+
+            if (!myProcess.Start()) {
+                MessageBox.Show("Failed to start mpv.exe.");
+                return;
+            }
+        } catch (Exception ex) {
+            MessageBox.Show($"Error launching mpv:\n{ex.Message}");
+            return;
+        }
+
+        // Wait for process to exit normally
+        try {
+            await eventHandled.Task;
+        } catch (Exception ex) {
+            // Very unlikely, but catch any event-handling issues
+            MessageBox.Show($"Unexpected error waiting for mpv exit:\n{ex.Message}");
+        } finally {
+            myProcess.Dispose();
+        }
+    }
+
+    public static async Task Do1kMpv1kAsync(string filename) {
+        DateTime originalWriteTime = File.GetLastWriteTime(filename);
+
+        try {
+            // Apply first 1k modification
+            SimpleHexViewer.Toggle1k.Do1k(filename);
+
+            // Launch mpv and wait for user to close
+            var launcher = new LaunchAndWait();
+            await launcher.LaunchMPV(filename);
+
+            // Short delay before reverting first 1k
+            await Task.Delay(200);
+            SimpleHexViewer.Toggle1k.Do1k(filename);
+        } finally {
+            // Restore original modification time
+            await Task.Delay(100);
+            File.SetLastWriteTime(filename, originalWriteTime);
+        }
+    }
+
+    [STAThread]
+    static void Main(string[] args) {
+        if (args.Length == 0) return;
+
+        string filename = args[0];
+        if (string.IsNullOrWhiteSpace(filename) || !File.Exists(filename)) {
+            MessageBox.Show("File not found!");
+            return;
+        }
+
+        long length = new FileInfo(filename).Length;
+        if (length < 1024 * 1024) {
+            MessageBox.Show("File too small!");
+            return;
+        }
+
+        try {
+            Task.Run(async () => await Do1kMpv1kAsync(filename))
+                .GetAwaiter()
+                .GetResult();
+        } catch (Exception ex) {
+            MessageBox.Show($"An unexpected error occurred:\n{ex.Message}");
+        }
+    }
+}
+
+What’s improved
+
+Checks Process.Start() return value — handles the rare case mpv fails to launch.
+
+Wraps await eventHandled.Task in try/finally with Dispose() to ensure cleanup.
+
+Adds small try/catch blocks around process event handling for extra safety.
+
+Keeps no timeout, so user can watch videos of any length.
+
+Preserves the file restoration logic in finally.
+
+This approach is safe for long-running videos while still robust against crashes or failures.
+
+If you want, I can also replace the Task.Run(...).GetAwaiter().GetResult() pattern in Main with a fully modern async Main for better clarity in .NET 6+ style, while keeping [STAThread] for MessageBox. Do you want me to do that?
+--------------------------------------
